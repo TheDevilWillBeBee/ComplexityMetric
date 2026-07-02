@@ -1,0 +1,6 @@
+torch
+torchvision
+moviepy==1.0.3
+streamlit
+matplotlib
+brotli
