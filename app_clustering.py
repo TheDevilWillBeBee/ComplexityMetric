@@ -12,28 +12,33 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from DynamicalSystems import BinaryCA1D, Rollout  # noqa: E402
+from DynamicalSystems import BinaryCA1D, OuterTotalisticCA2D, Rollout  # noqa: E402
 from FeatureExtractor import (  # noqa: E402
+    CLIP,
     ContinuousFlatten,
     DiscreteFlatten,
     RandomConvNet,
     RandomVGG,
     SpatialStatistics,
+    VGG16,
 )
 
 
 @dataclass(frozen=True)
 class ExtractorSpec:
     cls: type
+    dims: tuple[int, ...]
     note: str
 
 
 EXTRACTORS = {
-    "DiscreteFlatten": ExtractorSpec(DiscreteFlatten, "Discrete Hamming features from final states."),
-    "ContinuousFlatten": ExtractorSpec(ContinuousFlatten, "One-hot continuous flattening of final states."),
-    "SpatialStatistics": ExtractorSpec(SpatialStatistics, "Mean/std summary over the final 1D lattice."),
-    "RandomConvNet": ExtractorSpec(RandomConvNet, "Random convolutional continuous embedding."),
-    "RandomVGG": ExtractorSpec(RandomVGG, "VGG16-style random convolutional continuous embedding."),
+    "DiscreteFlatten": ExtractorSpec(DiscreteFlatten, (1, 2), "Discrete Hamming features from final states."),
+    "ContinuousFlatten": ExtractorSpec(ContinuousFlatten, (1, 2), "One-hot continuous flattening of final states."),
+    "SpatialStatistics": ExtractorSpec(SpatialStatistics, (1, 2), "Mean/std summary over the final lattice."),
+    "RandomConvNet": ExtractorSpec(RandomConvNet, (1, 2), "Random convolutional continuous embedding."),
+    "RandomVGG": ExtractorSpec(RandomVGG, (1, 2), "VGG16-style random convolutional continuous embedding."),
+    "VGG16": ExtractorSpec(VGG16, (2,), "Torchvision VGG16 feature embedding."),
+    "CLIP": ExtractorSpec(CLIP, (2,), "CLIP image embedding if open_clip is installed."),
 }
 
 
@@ -44,6 +49,14 @@ def device_options() -> list[str]:
     if torch.cuda.is_available():
         devices.append("cuda")
     return devices
+
+
+def clip_available() -> bool:
+    try:
+        import open_clip  # noqa: F401
+    except Exception:
+        return False
+    return True
 
 
 @st.cache_data
@@ -90,31 +103,53 @@ def _complement_rule(rule: int) -> int:
 
 def sidebar() -> dict:
     st.sidebar.header("Simulation")
+    family = st.sidebar.selectbox("Rule family", ["1D ECA canonical rules", "2D outer-totalistic random rules"])
+    spatial_dim = 1 if family.startswith("1D") else 2
     cfg = {
+        "family": family,
+        "spatial_dim": spatial_dim,
         "device": st.sidebar.selectbox("Device", device_options()),
         "steps": int(st.sidebar.number_input("K steps", min_value=1, max_value=5000, value=128, step=8)),
         "batch_size": int(st.sidebar.number_input("B per rule", min_value=1, max_value=32, value=4)),
-        "width": int(st.sidebar.number_input("Width", min_value=32, max_value=2048, value=256, step=32)),
         "seed_mode": st.sidebar.selectbox("Seed mode", ["noise", "single", "zeros"]),
         "seed_p": float(st.sidebar.slider("Initial density", 0.0, 1.0, 0.5, 0.01)),
         "torch_seed": int(st.sidebar.number_input("Torch seed", min_value=0, max_value=(1 << 31) - 1, value=0)),
     }
+    if spatial_dim == 1:
+        cfg["width"] = int(st.sidebar.number_input("Width", min_value=32, max_value=2048, value=256, step=32))
+        cfg["height"] = None
+        cfg["rule_count"] = len(canonical_eca_rules())
+    else:
+        c1, c2 = st.sidebar.columns(2)
+        cfg["height"] = int(c1.number_input("Height", min_value=32, max_value=512, value=64, step=8))
+        cfg["width"] = int(c2.number_input("Width", min_value=32, max_value=512, value=64, step=8))
+        cfg["rule_count"] = int(st.sidebar.number_input("Rules to sample", min_value=1, max_value=2048, value=88))
+        cfg["kernel_size"] = int(st.sidebar.number_input("Kernel size", min_value=3, max_value=9, value=3, step=2))
+        cfg["p_birth"] = float(st.sidebar.slider("Birth table density", 0.0, 1.0, 0.5, 0.01))
+        cfg["p_survive"] = float(st.sidebar.slider("Survival table density", 0.0, 1.0, 0.5, 0.01))
 
     st.sidebar.header("Features")
-    cfg["extractor"] = st.sidebar.selectbox("Feature extractor", list(EXTRACTORS), index=0)
+    options = [
+        name
+        for name, spec in EXTRACTORS.items()
+        if spatial_dim in spec.dims and (name != "CLIP" or clip_available())
+    ]
+    cfg["extractor"] = st.sidebar.selectbox("Feature extractor", options, index=0)
     cfg["embed_dim"] = int(st.sidebar.number_input("Feature dimension", min_value=2, max_value=512, value=64, step=8))
     cfg["extractor_seed"] = int(st.sidebar.number_input("Extractor seed", min_value=0, max_value=(1 << 31) - 1, value=0))
     cfg["embed_chunk"] = int(st.sidebar.number_input("Embedding chunk", min_value=0, max_value=4096, value=256, step=64))
+    cfg["vgg16_pretrained"] = bool(st.sidebar.checkbox("VGG16 ImageNet weights", value=False))
 
     st.sidebar.header("Clustering")
-    cfg["n_clusters"] = int(st.sidebar.number_input("Clusters", min_value=2, max_value=88, value=8))
+    max_clusters = max(2, int(cfg["rule_count"]))
+    cfg["n_clusters"] = int(st.sidebar.number_input("Clusters", min_value=2, max_value=max_clusters, value=min(8, max_clusters)))
     cfg["cluster_iters"] = int(st.sidebar.number_input("K-medoids iterations", min_value=1, max_value=100, value=20))
 
     return cfg
 
 
 def make_extractor(name: str, cfg: dict):
-    common = {"spatial_dim": 1, "device": cfg["device"]}
+    common = {"spatial_dim": cfg["spatial_dim"], "device": cfg["device"]}
     if name == "DiscreteFlatten":
         return DiscreteFlatten(**common).eval()
     if name == "ContinuousFlatten":
@@ -125,10 +160,15 @@ def make_extractor(name: str, cfg: dict):
         return RandomConvNet(**common, embed_dim=cfg["embed_dim"], seed=cfg["extractor_seed"]).eval()
     if name == "RandomVGG":
         return RandomVGG(**common, embed_dim=cfg["embed_dim"], seed=cfg["extractor_seed"]).eval()
+    if name == "VGG16":
+        return VGG16(embed_dim=cfg["embed_dim"], pretrained=cfg["vgg16_pretrained"], seed=cfg["extractor_seed"], device=cfg["device"]).eval()
+    if name == "CLIP":
+        return CLIP(embed_dim=cfg["embed_dim"], device=cfg["device"]).eval()
     raise ValueError(f"unknown extractor: {name}")
 
 
-def simulate_final_states(cfg: dict, rules: list[int]) -> tuple[Rollout, torch.Tensor]:
+def simulate_eca_final_states(cfg: dict):
+    rules = canonical_eca_rules()
     device = torch.device(cfg["device"])
     torch.manual_seed(cfg["torch_seed"])
     system = BinaryCA1D(kernel_size=3, device=device)
@@ -155,7 +195,67 @@ def simulate_final_states(cfg: dict, rules: list[int]) -> tuple[Rollout, torch.T
         to_rgb_fn=system.to_rgb,
         system_name="BinaryCA1D",
     )
-    return rollout, rule_ids.cpu()
+    rule_info = pd.DataFrame({"rule": rules, "label": [str(r) for r in rules]})
+    return rollout, rule_ids.cpu(), rules, [str(r) for r in rules], rule_info
+
+
+def simulate_outer_totalistic_2d_final_states(cfg: dict):
+    device = torch.device(cfg["device"])
+    torch.manual_seed(cfg["torch_seed"])
+    system = OuterTotalisticCA2D(kernel_size=cfg["kernel_size"], device=device)
+    n_rules = int(cfg["rule_count"])
+    rule_keys = list(range(n_rules))
+    rule_names = [f"rule_{i:03d}" for i in rule_keys]
+    params = system.sample_params(
+        n_rules,
+        device=device,
+        kernel_size=cfg["kernel_size"],
+        p_birth=cfg["p_birth"],
+        p_survive=cfg["p_survive"],
+    )
+    repeated_params = {key: value.repeat_interleave(cfg["batch_size"], dim=0) for key, value in params.items()}
+    rule_ids = torch.arange(n_rules, device=device, dtype=torch.long).repeat_interleave(cfg["batch_size"])
+    x = system.seed(
+        B=rule_ids.numel(),
+        H=cfg["height"],
+        W=cfg["width"],
+        mode=cfg["seed_mode"],
+        p=cfg["seed_p"],
+    )
+    with torch.no_grad():
+        for _ in range(cfg["steps"]):
+            x = system(x, repeated_params)
+    rollout = Rollout(
+        tensor=x.unsqueeze(1),
+        steps=cfg["steps"],
+        every=1,
+        skip=0,
+        is_discrete=True,
+        num_states=2,
+        spatial_dim=2,
+        to_rgb_fn=system.to_rgb,
+        system_name="OuterTotalisticCA2D",
+    )
+    rule_info = pd.DataFrame(
+        {
+            "rule": rule_keys,
+            "label": rule_names,
+            "description": [_outer_totalistic_desc(params["B"][i], params["S"][i]) for i in range(n_rules)],
+        }
+    )
+    return rollout, rule_ids.cpu(), rule_keys, rule_names, rule_info
+
+
+def simulate_final_states(cfg: dict):
+    if cfg["spatial_dim"] == 1:
+        return simulate_eca_final_states(cfg)
+    return simulate_outer_totalistic_2d_final_states(cfg)
+
+
+def _outer_totalistic_desc(birth: torch.Tensor, survive: torch.Tensor) -> str:
+    b = ",".join(str(i) for i, v in enumerate(birth.detach().cpu().long().tolist()) if int(v))
+    s = ",".join(str(i) for i, v in enumerate(survive.detach().cpu().long().tolist()) if int(v))
+    return f"B[{b}]/S[{s}]"
 
 
 def embed_final_states(rollout: Rollout, cfg: dict):
@@ -199,6 +299,24 @@ def distance_summary(dist: torch.Tensor, rule_ids: torch.Tensor) -> pd.DataFrame
     return pd.DataFrame(rows)
 
 
+def distance_ratio_summary(summary: pd.DataFrame) -> pd.DataFrame:
+    means = dict(zip(summary["comparison"], summary["mean"]))
+    intra = means.get("intra_rule")
+    inter = means.get("inter_rule")
+    intra_over_inter = None if intra is None or inter in (None, 0) else float(intra) / float(inter)
+    inter_over_intra = None if inter is None or intra in (None, 0) else float(inter) / float(intra)
+    return pd.DataFrame(
+        [
+            {
+                "intra_mean": intra,
+                "inter_mean": inter,
+                "intra_over_inter": intra_over_inter,
+                "inter_over_intra": inter_over_intra,
+            }
+        ]
+    )
+
+
 def k_medoids(dist: torch.Tensor, n_clusters: int, *, max_iter: int, seed: int) -> tuple[torch.Tensor, torch.Tensor]:
     n = dist.shape[0]
     k = min(int(n_clusters), n)
@@ -222,22 +340,22 @@ def k_medoids(dist: torch.Tensor, n_clusters: int, *, max_iter: int, seed: int) 
     return dist[:, medoids].argmin(dim=1).cpu(), medoids.cpu()
 
 
-def composition_tables(labels: torch.Tensor, rule_ids: torch.Tensor, rules: list[int], batch_size: int):
+def composition_tables(labels: torch.Tensor, rule_ids: torch.Tensor, rule_keys: list[int], rule_names: list[str], batch_size: int):
     clusters = sorted(int(v) for v in labels.unique().tolist())
-    matrix = pd.DataFrame(0.0, index=[f"cluster_{c}" for c in clusters], columns=[str(r) for r in rules])
+    matrix = pd.DataFrame(0.0, index=[f"cluster_{c}" for c in clusters], columns=rule_names)
     rows = []
     for cluster in clusters:
         mask = labels == cluster
         cluster_size = int(mask.sum())
-        for rule in rules:
+        for rule, name in zip(rule_keys, rule_names):
             count = int(((rule_ids == rule) & mask).sum())
             pct_rule = 100.0 * count / float(batch_size)
-            matrix.loc[f"cluster_{cluster}", str(rule)] = pct_rule
+            matrix.loc[f"cluster_{cluster}", name] = pct_rule
             if count:
                 rows.append(
                     {
                         "cluster": cluster,
-                        "rule": rule,
+                        "rule": name,
                         "count": count,
                         "pct_of_rule_batch": pct_rule,
                         "pct_of_cluster": 100.0 * count / float(cluster_size),
@@ -248,18 +366,19 @@ def composition_tables(labels: torch.Tensor, rule_ids: torch.Tensor, rules: list
 
 
 def run(cfg: dict):
-    rules = canonical_eca_rules()
-    rollout, rule_ids = simulate_final_states(cfg, rules)
+    rollout, rule_ids, rule_keys, rule_names, rule_info = simulate_final_states(cfg)
     embedding, extractor = embed_final_states(rollout, cfg)
     z = embedding.tensor[:, 0].detach()
     dist = pairwise_distances(z, discrete=embedding.is_discrete, chunk=512).cpu()
     labels, medoids = k_medoids(dist, cfg["n_clusters"], max_iter=cfg["cluster_iters"], seed=cfg["torch_seed"])
-    composition, cluster_rules = composition_tables(labels, rule_ids, rules, cfg["batch_size"])
+    composition, cluster_rules = composition_tables(labels, rule_ids, rule_keys, rule_names, cfg["batch_size"])
+    dist_summary = distance_summary(dist, rule_ids)
 
     st.subheader("Run Summary")
     st.write(
         {
-            "rules": len(rules),
+            "rule_family": cfg["family"],
+            "rules": len(rule_keys),
             "points": int(z.shape[0]),
             "steps_per_rule": cfg["steps"],
             "batch_per_rule": cfg["batch_size"],
@@ -272,10 +391,12 @@ def run(cfg: dict):
     )
 
     st.subheader("Inter vs Intra Rule Distance")
-    st.dataframe(distance_summary(dist, rule_ids), use_container_width=True, hide_index=True)
+    st.dataframe(dist_summary, use_container_width=True, hide_index=True)
+    st.dataframe(distance_ratio_summary(dist_summary), use_container_width=True, hide_index=True)
 
     st.subheader("Clusters")
-    medoid_rules = rule_ids[medoids].tolist()
+    name_by_key = dict(zip(rule_keys, rule_names))
+    medoid_rules = [name_by_key[int(rule_ids[i])] for i in medoids.tolist()]
     st.dataframe(
         pd.DataFrame({"cluster": list(range(len(medoids))), "medoid_index": medoids.tolist(), "medoid_rule": medoid_rules}),
         use_container_width=True,
@@ -286,14 +407,14 @@ def run(cfg: dict):
     st.subheader("Cluster Rule Contents")
     st.dataframe(cluster_rules, use_container_width=True, hide_index=True)
 
-    with st.expander("Canonical ECA rules"):
-        st.write(rules)
+    with st.expander("Rules"):
+        st.dataframe(rule_info, use_container_width=True, hide_index=True)
 
 
 def main():
-    st.set_page_config(page_title="ECA Rule Clustering", layout="wide")
-    st.title("ECA Rule Clustering")
-    st.caption("Final-state embeddings for the 88 elementary cellular automata rules modulo reflection and complement symmetries.")
+    st.set_page_config(page_title="CA Rule Clustering", layout="wide")
+    st.title("CA Rule Clustering")
+    st.caption("Final-state embeddings for canonical 1D ECA rules or randomly sampled 2D outer-totalistic rules.")
     cfg = sidebar()
     if st.button("Run clustering", type="primary"):
         run(cfg)
