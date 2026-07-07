@@ -1,0 +1,30 @@
+[project]
+name = "complexity-metric"
+version = "0.1.0"
+description = "Complexity metrics for dynamical systems (cellular automata, reaction-diffusion) with Streamlit explorers"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0",
+    "torchvision",
+    "numpy",
+    "pandas",
+    "streamlit",
+    "matplotlib",
+    # moviepy 2.x removed moviepy.editor (used in DynamicalSystems/utils.py)
+    "moviepy==1.0.3",
+    "brotli",
+    "pillow",
+    # sklearn.manifold.TSNE (FeatureExtractor/embedding.py)
+    "scikit-learn",
+]
+
+[project.optional-dependencies]
+# optional trajectory projection (FeatureExtractor/embedding.py)
+umap = ["umap-learn"]
+# optional CLIP extractor (FeatureExtractor/extractors.py)
+clip = ["open-clip-torch"]
+
+[tool.uv]
+# repo of top-level packages + scripts, not an installable distribution
+package = false

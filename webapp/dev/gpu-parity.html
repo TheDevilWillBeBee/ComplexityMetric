@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>CPU / WebGPU parity harness</title>
+    <link rel="stylesheet" href="/src/ui/style.css" />
+    <style>
+      body { padding: 2rem; }
+      td.pass { color: #7dff8a; }
+      td.fail { color: #ff6a6a; font-weight: bold; }
+    </style>
+  </head>
+  <body>
+    <h1>CPU / WebGPU parity harness</h1>
+    <p>Discrete systems must be bit-exact; continuous systems compare to float32 tolerance.</p>
+    <div id="out">running…</div>
+    <script type="module" src="/dev/parity.ts"></script>
+  </body>
+</html>
